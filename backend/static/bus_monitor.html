@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>BlindNav 公車辨識監看</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #0f172a;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: row;
+      height: 100vh;
+    }
+    #video-panel {
+      flex: 3;
+      background-color: #020617;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #video-panel img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      background-color: #020617;
+      image-rendering: auto;
+      -webkit-backface-visibility: hidden;
+      backface-visibility: hidden;
+      transform: translateZ(0);
+      /* 強制硬體加速，提升顯示流暢度 */
+    }
+    #info-panel {
+      flex: 2;
+      padding: 16px;
+      border-left: 1px solid #1e293b;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    h1 {
+      font-size: 1.2rem;
+      margin: 0;
+    }
+    .card {
+      background-color: #020617;
+      border-radius: 12px;
+      padding: 12px 14px;
+      border: 1px solid #1e293b;
+    }
+    .label {
+      font-size: 0.85rem;
+      color: #9ca3af;
+      margin-bottom: 4px;
+    }
+    #bus-number {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #f97316;
+    }
+    #raw-text {
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.8rem;
+      color: #e5e7eb;
+    }
+  </style>
+</head>
+<body>
+  <div id="video-panel">
+    <!-- MJPEG stream -->
+    <img id="bus-stream" src="/bus_vision/stream" alt="Bus vision stream" style="display:none;" />
+    <!-- 成功訊息顯示區域 -->
+    <div id="success-message" style="display:none;text-align:center;padding:40px;color:#e5e7eb;">
+      <div style="font-size:2.5rem;color:#22c55e;margin-bottom:20px;">✓</div>
+      <div style="font-size:1.8rem;font-weight:700;margin-bottom:15px;color:#e5e7eb;">識別成功</div>
+      <div style="font-size:1.4rem;color:#94a3b8;margin-bottom:10px;" id="success-bus-number">目標公車 <span style="color:#f97316;font-weight:700;">XXX</span> 號即將進站</div>
+      <div style="font-size:1.1rem;color:#64748b;margin-top:25px;">上車後將繼續導航</div>
+    </div>
+    <!-- 公車行駛中訊息顯示區域 -->
+    <div id="bus-riding-message" style="display:none;text-align:center;padding:40px;color:#e5e7eb;">
+      <div style="font-size:2.5rem;color:#3b82f6;margin-bottom:20px;">🚌</div>
+      <div style="font-size:1.8rem;font-weight:700;margin-bottom:15px;color:#e5e7eb;">公車行駛中</div>
+      <div style="font-size:1.1rem;color:#64748b;margin-top:25px;">即將抵達目的地</div>
+    </div>
+    <!-- GPS位置提示顯示區域 -->
+    <div id="gps-message" style="display:none;text-align:center;padding:40px;color:#e5e7eb;">
+      <div style="font-size:1.8rem;font-weight:600;color:#fbbf24;margin-bottom:10px;" id="gps-text">再50公尺到達公車站牌</div>
+    </div>
+  </div>
+  <div id="info-panel">
+    <div>
+      <h1>公車前方 LED 辨識監看</h1>
+      <div style="font-size:0.9rem;color:#9ca3af;margin-top:8px;">
+        此視窗顯示公車辨識結果。請將手機鏡頭對準公車前方的電子看板。
+      </div>
+      <div style="font-size:0.85rem;color:#64748b;margin-top:4px;">
+        💡 提示：系統會統計最近5次偵測結果，計算每個號碼的信心度，最上方顯示最有信心的公車號碼。
+      </div>
+    </div>
+
+    <div class="card" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 2px solid #f97316;">
+      <div class="label" style="color:#fbbf24;">最有信心的公車號碼</div>
+      <div id="best-bus-number" style="font-size:3rem;font-weight:700;color:#f97316;text-align:center;margin:12px 0;">—</div>
+      <div style="font-size:0.85rem;color:#9ca3af;text-align:center;">
+        信心度：<span id="best-conf" style="color:#fbbf24;font-weight:600;">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">所有偵測到的號碼</div>
+      <div id="all-detections" style="display:flex;flex-direction:column;gap:8px;max-height:200px;overflow-y:auto;">
+        <div style="color:#64748b;font-size:0.85rem;">尚未偵測到任何號碼</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">最近一次辨識車號</div>
+      <div id="bus-number" style="font-size:1.5rem;font-weight:600;color:#e5e7eb;">—</div>
+      <div style="font-size:0.8rem;color:#9ca3af;margin-top:4px;">
+        最近更新時間：<span id="bus-time">—</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">原始 OCR 文字</div>
+      <div id="raw-text" style="max-height:100px;overflow-y:auto;">—</div>
+    </div>
+  </div>
+
+  <script src="/static/bus_monitor.js"></script>
+</body>
+</html>
