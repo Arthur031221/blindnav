@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>BlindNav 後台監看</title>
+  <title>You Are My Eyes 後台監看</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
@@ -84,7 +84,7 @@
 <body>
   <div class="top-bar">
     <div>
-      <h1>BlindNav 後台監看</h1>
+      <h1>You Are My Eyes 後台監看</h1>
       <div style="font-size:0.8rem;color:#9ca3af;">
         監看與使用同一組 device ID 的眼鏡端路線與位置
       </div>
@@ -101,10 +101,13 @@
         <button id="set-device-id">設定</button>
       </div>
       <button id="refresh-device">手動更新</button>
+      <button id="reset-simulation" style="background:#7c3aed;border:1px solid #a855f7;">
+        重設模擬
+      </button>
     </div>
   </div>
 
-  <div class="card">
+    <div class="card">
     <div id="map"></div>
   </div>
 
@@ -122,8 +125,11 @@
       <span class="label">終點：</span><span id="end-addr">—</span>
     </div>
     <div class="meta-row">
-      <span class="label">目前步驟：</span><span id="step-text">—</span>
-    </div>
+        <span class="label">目前步驟：</span><span id="step-text">—</span>
+      </div>
+      <div class="meta-row" style="margin-top:8px;">
+        <button style="margin-top:6px;" onclick="window.forceResumeNavigation && window.forceResumeNavigation()">⚡ 強制繼續導航</button>
+      </div>
     <div class="meta-row">
       <span class="label">使用者設定出發時間：</span
       ><span id="req-dep-time">—</span>

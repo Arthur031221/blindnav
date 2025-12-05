@@ -260,9 +260,9 @@ window.addEventListener("message", (event) => {
       // 先檢查後端是否已經啟動，如果沒有則先啟動
       async function checkAndStartStream() {
         try {
-          // 先確保後端已經啟動 bus_vision（使用手機模式）
+          // 先確保後端已經啟動 bus_vision（不傳參數，讓後端根據配置檔案決定）
           console.log("[bus_monitor] 確保後端 bus_vision 已啟動...");
-          const startResp = await fetch("/bus_vision/start?use_mobile=true", {
+          const startResp = await fetch("/bus_vision/start", {
             method: "POST"
           });
           

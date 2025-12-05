@@ -24,7 +24,7 @@ def generate_self_signed_cert():
         x509.NameAttribute(NameOID.COUNTRY_NAME, "TW"),
         x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Taiwan"),
         x509.NameAttribute(NameOID.LOCALITY_NAME, "Local"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "BlindNav Dev"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "You Are My Eyes"),
         x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
     ])
     

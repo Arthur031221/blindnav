@@ -12,6 +12,100 @@ let pollTimer = null;
 let busMonitorWindow = null;
 let lastBusStepIndex = null;
 let busMonitorOpened = false; // 標記是否已打開 bus_monitor 視窗
+let detectionCompleted = false; // 是否已完成辨識並成功上車
+const BUS_DETECTION_DISTANCE = 8; // 公車辨識觸發距離（顯示距離 <= 8m）
+const TRAFFIC_DETECTION_DISTANCE = 50; // 行人號誌觸發距離（顯示距離 <= 50m）
+const DISTANCE_CORRECTION = 156; // 實際距離校正量（公尺）
+const DEFAULT_ORIGIN = { lat: 24.796123, lng: 120.9935 };
+const DEFAULT_ZOOM = 14;
+let trafficCheckTriggered = false;
+let trafficCheckCompleted = false;
+let trafficCheckInProgress = false;
+let navigationPaused = false;
+let userForceResume = false;
+let trafficStepIndex = null;
+let trafficFallbackTimer = null;
+let suppressMapFit = false;
+
+function applyForceResume(reason = "external") {
+  console.warn("[monitor] 強制繼續導航觸發：", reason);
+  userForceResume = true;
+  navigationPaused = false;
+  trafficCheckTriggered = false;
+  trafficCheckInProgress = false;
+  trafficCheckCompleted = false;
+  detectionCompleted = false;
+  suppressMapFit = true;
+  if (trafficFallbackTimer) {
+    clearTimeout(trafficFallbackTimer);
+    trafficFallbackTimer = null;
+  }
+  fetch("/bus_vision/stop", { method: "POST" }).catch(() => {});
+  if (busMonitorWindow && !busMonitorWindow.closed) {
+    busMonitorWindow.postMessage({ type: "MANUAL_FORCE_RESUME" }, "*");
+  }
+}
+
+function resetLocalSimulationState() {
+  trafficCheckTriggered = false;
+  trafficCheckCompleted = false;
+  trafficCheckInProgress = false;
+  navigationPaused = false;
+  userForceResume = false;
+  detectionCompleted = false;
+  suppressMapFit = false;
+  lastBusStepIndex = null;
+  if (trafficFallbackTimer) {
+    clearTimeout(trafficFallbackTimer);
+    trafficFallbackTimer = null;
+  }
+  if (routePolyline) {
+    routePolyline.setMap(null);
+    routePolyline = null;
+  }
+  if (startMarker) {
+    startMarker.setMap(null);
+    startMarker = null;
+  }
+  if (endMarker) {
+    endMarker.setMap(null);
+    endMarker = null;
+  }
+  if (map) {
+    map.setCenter(DEFAULT_ORIGIN);
+    map.setZoom(DEFAULT_ZOOM);
+  }
+  clearAllDisplay();
+  const devSpan = document.getElementById("device-id-display");
+  if (devSpan && deviceId) {
+    devSpan.textContent = deviceId;
+    devSpan.style.color = "";
+  }
+  if (busMonitorWindow && !busMonitorWindow.closed) {
+    busMonitorWindow.postMessage({ type: "RESET_VIEW" }, "*");
+  }
+}
+
+async function setForceResumeFlagOnServer() {
+  if (!deviceId) {
+    deviceId = getDeviceId();
+  }
+  if (!deviceId) return;
+  try {
+    await fetch("/force_resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+  } catch (err) {
+    console.warn("[monitor] 設定 force_resume 旗標失敗:", err);
+  }
+}
+
+window.forceResumeNavigation = function () {
+  setForceResumeFlagOnServer();
+  applyForceResume("monitor_button");
+};
 
 // 和 app.js 共用 device_id，但優先使用 URL 參數或手動輸入
 function getDeviceId() {
@@ -23,7 +117,7 @@ function getDeviceId() {
   }
   
   // 其次使用 localStorage
-  const KEY = "blindnav_device_id";
+  const KEY = "you_are_my_eyes_device_id";
   let id = window.localStorage.getItem(KEY);
   if (!id) {
     const rand = Math.random().toString(36).slice(2, 10);
@@ -43,7 +137,7 @@ function setDeviceId(newId) {
   console.log("[monitor] 設定 device_id:", trimmedId);
   
   deviceId = trimmedId;
-  const KEY = "blindnav_device_id";
+  const KEY = "you_are_my_eyes_device_id";
   window.localStorage.setItem(KEY, deviceId);
   
   const devSpan = document.getElementById("device-id-display");
@@ -99,8 +193,8 @@ async function fetchSnapshotOnce() {
         // 清空所有顯示
         clearAllDisplay();
         return;
-      }
-      return;
+    }
+    return;
     }
     
     const snap = await resp.json();
@@ -111,6 +205,10 @@ async function fetchSnapshotOnce() {
     if (devSpan) {
       devSpan.textContent = deviceId;
       devSpan.style.color = ""; // 恢復正常顏色
+    }
+
+    if (snap.force_resume_requested) {
+      applyForceResume("server_flag");
     }
     
     // 檢查是否有路線資料
@@ -129,6 +227,36 @@ async function fetchSnapshotOnce() {
       devSpan.textContent = `${deviceId} (連接錯誤)`;
       devSpan.style.color = "#ef4444";
     }
+  }
+}
+
+async function handleResetSimulation(buttonEl) {
+  if (!deviceId) {
+    alert("請先設定裝置 ID");
+    return;
+  }
+  const originalText = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = "重設中...";
+  try {
+    await fetch("/bus_vision/stop", { method: "POST" }).catch(() => {});
+    const resp = await fetch("/device_state/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+    if (!resp.ok) {
+      const msg = await resp.text();
+      throw new Error(msg || "重設失敗");
+    }
+    resetLocalSimulationState();
+    await fetchSnapshotOnce();
+  } catch (err) {
+    console.error("[monitor] 重設模擬失敗", err);
+    alert(`重設失敗：${err.message}`);
+  } finally {
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalText;
   }
 }
 
@@ -173,11 +301,12 @@ function checkAndOpenBusMonitor(snap) {
     ? Math.min(Math.max(snap.last_step_index, 0), steps.length - 1)
     : 0;
   
-  // 確保 bus_monitor 視窗已打開
+    // 確保 bus_monitor 視窗已打開
+  // 使用 video_test.html 作為測試用視窗
   if (!busMonitorWindow || busMonitorWindow.closed) {
-    busMonitorWindow = window.open("/bus_monitor", "_blank");
+    busMonitorWindow = window.open("/video_test", "_blank");
     busMonitorOpened = true;
-    console.log("[monitor] 已重新打開公車監視畫面");
+    console.log("[monitor] 已重新打開測試視窗 (video_test)");
   }
   
   // 檢查是否需要觸發視訊（接近公車站時）
@@ -191,10 +320,42 @@ function checkAndOpenBusMonitor(snap) {
       break;
     }
   }
+
+  if (nextBusStepIndex !== null) {
+    if (trafficStepIndex !== nextBusStepIndex) {
+      trafficStepIndex = nextBusStepIndex;
+      trafficCheckTriggered = false;
+      trafficCheckCompleted = false;
+      trafficCheckInProgress = false;
+      navigationPaused = false;
+      userForceResume = false;
+      detectionCompleted = false;
+    }
+  } else {
+    trafficStepIndex = null;
+    trafficCheckTriggered = false;
+    trafficCheckCompleted = false;
+    trafficCheckInProgress = false;
+    navigationPaused = false;
+    userForceResume = false;
+    detectionCompleted = false;
+  }
+
+  // 如果上一段公車辨識已完成且仍在同一步驟，先不要再次觸發
+  if (detectionCompleted) {
+    if (nextBusStepIndex === null || currentStepIndex > nextBusStepIndex) {
+      // 已經進入下一段路徑，重置狀態以便之後再次辨識
+      detectionCompleted = false;
+      console.log("[monitor] 偵測狀態已重置，準備下次公車辨識。");
+    } else {
+      return;
+    }
+  }
   
   // 如果下一步是公車，計算距離並顯示GPS提示
   if (nextBusStep && nextBusStepIndex !== null) {
     let distance = null;
+    let displayDistance = null;
     let gpsMessage = null;
     
     // 公車站的位置應該是當前步驟（walk）的結束位置，而不是公車步驟的目標位置
@@ -208,7 +369,11 @@ function checkAndOpenBusMonitor(snap) {
     let busStopLat = null;
     let busStopLng = null;
     
-    if (currentStep && currentStep.target_lat && currentStep.target_lng) {
+    // 優先使用 bus_ride 步驟本身的 bus_stop 座標（從 Google Transit departure_stop 取得）
+    if (nextBusStep && typeof nextBusStep.bus_stop_lat === "number" && typeof nextBusStep.bus_stop_lng === "number") {
+      busStopLat = nextBusStep.bus_stop_lat;
+      busStopLng = nextBusStep.bus_stop_lng;
+    } else if (currentStep && currentStep.target_lat && currentStep.target_lng) {
       // 使用當前步驟的結束位置作為公車站位置
       busStopLat = currentStep.target_lat;
       busStopLng = currentStep.target_lng;
@@ -224,81 +389,96 @@ function checkAndOpenBusMonitor(snap) {
     // 計算距離（使用模擬的實際位置和公車站位置）
     if (typeof snap.last_lat === "number" && typeof snap.last_lng === "number" && 
         busStopLat !== null && busStopLng !== null) {
-      distance = haversineDistance(
+      const rawDistance = haversineDistance(
         snap.last_lat,
         snap.last_lng,
         busStopLat,
         busStopLng
       );
+      distance = Math.max(rawDistance - DISTANCE_CORRECTION, 0);
+      displayDistance = Math.max(Math.round(distance), 0);
       
-      console.log(`[monitor] 距離公車站: ${Math.round(distance)}公尺 (位置: ${snap.last_lat}, ${snap.last_lng} -> ${busStopLat}, ${busStopLng})`);
+      console.log(
+        `[monitor] 距離公車站: 原始 ${Math.round(rawDistance)} 公尺、校正後 ${Math.round(distance)} 公尺 (位置: ${snap.last_lat}, ${snap.last_lng} -> ${busStopLat}, ${busStopLng})`
+      );
       
       // 根據距離顯示不同的GPS提示
-      // 當距離<=20公尺時，不顯示GPS提示，直接進入辨識模式
-      if (distance <= 20) {
-        // 距離<=20公尺，立即觸發辨識模式，不顯示GPS提示文字
-        console.log(`[monitor] 距離<=${Math.round(distance)}公尺，立即開啟辨識模式（從GPS訊息觸發）`);
-        // 立即通知 bus_monitor 開始辨識（不顯示GPS提示文字）
-        if (busMonitorWindow && !busMonitorWindow.closed) {
-          busMonitorWindow.postMessage({
-            type: "start_detection"
-          }, "*");
-        }
-        // 同時觸發 shouldTrigger，確保後續邏輯也執行
-        if (lastBusStepIndex !== nextBusStepIndex) {
-          lastBusStepIndex = nextBusStepIndex;
-        }
-        // 不設置 gpsMessage，直接跳過GPS訊息發送
-        gpsMessage = null;
+      if (displayDistance > 100) {
+        gpsMessage = `再${displayDistance}公尺到達公車站牌`;
+      } else if (displayDistance > 50) {
+        gpsMessage = `再${displayDistance}公尺到達公車站牌`;
+      } else if (displayDistance > 20) {
+        gpsMessage = `再${displayDistance}公尺到達公車站牌`;
       } else {
-        // 距離>20公尺時，顯示GPS提示
-        if (distance > 100) {
-          gpsMessage = `再${Math.round(distance)}公尺到達公車站牌`;
-        } else if (distance > 50) {
-          gpsMessage = `再${Math.round(distance)}公尺到達公車站牌`;
-        } else if (distance > 20) {
-          gpsMessage = `再${Math.round(distance)}公尺到達公車站牌`;
-        } else {
-          gpsMessage = `再${Math.round(distance)}公尺到達公車站牌`;
-        }
+        gpsMessage = `距離公車站牌約 ${displayDistance} 公尺`;
       }
       
-      // 發送GPS提示到 bus_monitor 視窗（只有在距離>20公尺時才發送）
-      if (busMonitorWindow && !busMonitorWindow.closed && gpsMessage) {
-        busMonitorWindow.postMessage({
-          type: "gps_message",
-          message: gpsMessage
-        }, "*");
+      if (busMonitorWindow && !busMonitorWindow.closed) {
+        if (gpsMessage) {
+          busMonitorWindow.postMessage(
+            {
+              type: "gps_message",
+              message: gpsMessage,
+              distance: distance,
+            },
+            "*"
+          );
+        } else if (distance !== null) {
+          busMonitorWindow.postMessage(
+            {
+              type: "update_distance",
+              distance: distance,
+            },
+            "*"
+          );
+        }
       }
     }
-    
-    // 距離 100 公尺內就觸發視訊
-    // 或者當模擬點已經到達或超過公車站步驟時，立即觸發
-    // 或者當距離<5公尺（顯示"公車10秒內進站"）時，立即觸發
-    let shouldTrigger = false;
-    
-    // 檢查模擬點是否已經到達公車站（通過步驟索引判斷）
+
     const isAtBusStop = currentStepIndex >= nextBusStepIndex - 1;
-    
-    if (distance !== null) {
-      // 有距離資訊
-      if (distance <= 100) {
-        shouldTrigger = true;
-      } else if (distance <= 20) {
-        // 距離<=20公尺，立即觸發辨識模式（將臨界值從5公尺提高到20公尺）
-        shouldTrigger = true;
-        console.log(`[monitor] 距離<=${Math.round(distance)}公尺，立即開啟辨識模式`);
-      } else if (isAtBusStop) {
-        // 即使距離顯示還很遠，但如果模擬點已經到達公車站，也觸發
-        console.log(`[monitor] 模擬點已到達公車站（步驟索引: ${currentStepIndex} >= ${nextBusStepIndex - 1}），立即觸發`);
-        shouldTrigger = true;
+
+    if (
+      !trafficCheckCompleted &&
+      !trafficCheckTriggered &&
+      displayDistance !== null &&
+      displayDistance < TRAFFIC_DETECTION_DISTANCE
+    ) {
+      trafficCheckTriggered = true;
+      trafficCheckInProgress = true;
+      navigationPaused = true;
+      if (trafficFallbackTimer) {
+        clearTimeout(trafficFallbackTimer);
       }
-    } else if (isAtBusStop) {
-      // 沒有距離資訊，但模擬點已經到達公車站，立即觸發
-      console.log(`[monitor] 模擬點已到達公車站（步驟索引: ${currentStepIndex} >= ${nextBusStepIndex - 1}），立即觸發`);
+      trafficFallbackTimer = setTimeout(() => {
+        console.warn("[monitor] 行人號誌辨識逾時，恢復導航並允許重新觸發");
+        trafficCheckTriggered = false;
+        trafficCheckInProgress = false;
+        trafficCheckCompleted = false;
+        navigationPaused = false;
+        trafficFallbackTimer = null;
+      }, 45000);
+      console.log("[monitor] 觸發行人號誌辨識流程");
+      if (busMonitorWindow && !busMonitorWindow.closed) {
+        busMonitorWindow.postMessage(
+          {
+            type: "start_traffic_detection",
+          },
+          "*"
+        );
+      }
+    }
+
+    if (navigationPaused) {
+      return;
+    }
+
+    let shouldTrigger = false;
+    const isVeryClose =
+      displayDistance !== null && displayDistance <= BUS_DETECTION_DISTANCE;
+    
+    if (isVeryClose && isAtBusStop) {
       shouldTrigger = true;
-    } else if (busStopLat === null || busStopLng === null) {
-      // 完全沒有位置資訊，但下一步是公車，也觸發
+    } else if (distance === null && isAtBusStop && busStopLat !== null && busStopLng !== null) {
       shouldTrigger = true;
     }
     
@@ -306,17 +486,22 @@ function checkAndOpenBusMonitor(snap) {
       lastBusStepIndex = nextBusStepIndex;
       console.log(`[monitor] 已觸發公車監視（接近公車站，距離: ${distance !== null ? Math.round(distance) + '公尺' : '未知'}）`);
       
-      // 通知 bus_monitor 開始辨識（顯示手機攝像頭影像）
-      // 這會隱藏GPS提示文字，顯示手機後置鏡頭畫面（有識別的框框）
       if (busMonitorWindow && !busMonitorWindow.closed) {
         busMonitorWindow.postMessage({
-          type: "start_detection"
+          type: "start_bus_detection",
+          autoStart: true,
         }, "*");
       }
     }
     
     // 檢查是否需要關閉視訊（離開公車站或完成公車步驟）
     if (nextBusStepIndex === null || currentStepIndex > nextBusStepIndex) {
+      trafficCheckTriggered = false;
+      trafficCheckCompleted = false;
+      trafficCheckInProgress = false;
+      navigationPaused = false;
+      userForceResume = false;
+      detectionCompleted = false;
       // 已經過了公車步驟，關閉視訊
       fetch("/bus_vision/status")
         .then(resp => resp.ok ? resp.json() : null)
@@ -379,6 +564,9 @@ function updateUIFromSnapshot(snap, isConnectedButNoRoute = false) {
   
   // 檢查是否需要打開公車監視
   checkAndOpenBusMonitor(snap);
+  if (navigationPaused) {
+    return;
+  }
   
   // 恢復正常顏色
   if (stepTextEl) stepTextEl.style.color = "";
@@ -452,7 +640,14 @@ function updateUIFromSnapshot(snap, isConnectedButNoRoute = false) {
         const bounds = new google.maps.LatLngBounds();
         path.forEach((p) => bounds.extend(p));
         if (!bounds.isEmpty()) {
-          map.fitBounds(bounds);
+          if (!suppressMapFit) {
+            map.fitBounds(bounds);
+          } else {
+            console.log("[monitor] 跳過 fitBounds（強制導航期間維持當前視窗）");
+          }
+        }
+        if (suppressMapFit) {
+          suppressMapFit = false;
         }
       }
     }
@@ -552,7 +747,7 @@ function initMonitorMap() {
   if (urlDeviceId) {
     console.log("[monitor] 從 URL 參數取得 device_id:", urlDeviceId);
     deviceId = urlDeviceId.trim();
-    const KEY = "blindnav_device_id";
+    const KEY = "you_are_my_eyes_device_id";
     window.localStorage.setItem(KEY, deviceId);
   } else {
     // 否則使用預設邏輯
@@ -565,9 +760,9 @@ function initMonitorMap() {
   
   // 一開始就打開 bus_monitor 視窗（但不啟動視訊）
   if (!busMonitorOpened) {
-    busMonitorWindow = window.open("/bus_monitor", "_blank");
+    busMonitorWindow = window.open("/video_test", "_blank");
     busMonitorOpened = true;
-    console.log("[monitor] 已自動打開公車監視畫面（初始）");
+    console.log("[monitor] 已自動打開測試視窗 (video_test)（初始）");
   }
   
   // 設定 device_id 輸入框
@@ -624,7 +819,35 @@ function initMonitorMap() {
     });
   }
 
-  map = new google.maps.Map(document.getElementById("map"), {
+  // 監聽來自 video_test 的訊息
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data) return;
+
+    if (data.type === "DETECTION_COMPLETE") {
+      console.log("[monitor] 收到公車辨識完成通知");
+      detectionCompleted = true;
+    } else if (data.type === "TRAFFIC_COMPLETE") {
+      console.log("[monitor] 收到行人號誌辨識完成通知，恢復導航");
+      if (trafficFallbackTimer) {
+        clearTimeout(trafficFallbackTimer);
+        trafficFallbackTimer = null;
+      }
+      trafficCheckInProgress = false;
+      trafficCheckCompleted = !data.failed;
+      trafficCheckTriggered = data.failed ? false : trafficCheckTriggered;
+      navigationPaused = false;
+      userForceResume = false;
+      if (!data.failed && busMonitorWindow && !busMonitorWindow.closed) {
+        busMonitorWindow.postMessage(
+          { type: "start_bus_detection", autoStart: false },
+          "*"
+        );
+      }
+    }
+  });
+
+    map = new google.maps.Map(document.getElementById("map"), {
     center: { lat: 23.7, lng: 120.9 },
     zoom: 8,
     mapTypeId: "roadmap",
@@ -633,6 +856,11 @@ function initMonitorMap() {
   const btn = document.getElementById("refresh-device");
   if (btn) {
     btn.addEventListener("click", fetchSnapshotOnce);
+  }
+
+  const resetBtn = document.getElementById("reset-simulation");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => handleResetSimulation(resetBtn));
   }
 
   // 如果 URL 沒有參數，才開始輪詢（因為 setDeviceId 已經會開始輪詢了）

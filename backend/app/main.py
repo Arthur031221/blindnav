@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -24,6 +24,12 @@ from app.bus_vision import (
     get_bus_status,
     receive_mobile_frame,
 )
+from app.pedestrian.service import (
+    get_live_preview_response as get_pedestrian_live_preview,
+    get_processed_video_response as get_pedestrian_video,
+    get_progress as get_pedestrian_progress,
+    start_processing as start_pedestrian_processing,
+)
 
 # === FastAPI app & static ===
 app = FastAPI()
@@ -31,6 +37,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # === Google Maps API key ===
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+DEFAULT_ORIGIN = {"lat": 24.796123, "lng": 120.9935}
 
 
 # === 資料模型 ===
@@ -47,6 +54,8 @@ class NavStep(BaseModel):
     target_lng: Optional[float] = None
     bus_departure_timestamp: Optional[int] = None
     bus_departure_text: Optional[str] = None
+    bus_stop_lat: Optional[float] = None   # departure stop latitude (公車站牌)
+    bus_stop_lng: Optional[float] = None   # departure stop longitude (公車站牌)
 
 
 class NavRoute(BaseModel):
@@ -74,9 +83,14 @@ class DeviceState(BaseModel):
     last_lat: Optional[float] = None
     last_lng: Optional[float] = None
     last_step_index: Optional[int] = None
+    force_resume_requested: bool = False
 
 
 class RegisterDeviceRequest(BaseModel):
+    device_id: str
+
+
+class ResetDeviceRequest(BaseModel):
     device_id: str
 
 
@@ -111,6 +125,12 @@ class DeviceSnapshot(BaseModel):
     last_lng: Optional[float]
     last_step_index: Optional[int]
     route: Optional[NavRoute]
+    force_resume_requested: bool = False
+
+
+class ForceResumeRequest(BaseModel):
+    device_id: str
+    clear: bool = False
 
 
 # === in-memory 狀態 ===
@@ -345,6 +365,9 @@ async def plan_route_with_google(
             arr_stop_obj = td.get("arrival_stop") or {}
             dep_stop_name = dep_stop_obj.get("name")
             arr_stop_name = arr_stop_obj.get("name")
+            dep_stop_loc = dep_stop_obj.get("location") or {}
+            dep_stop_lat = dep_stop_loc.get("lat")
+            dep_stop_lng = dep_stop_loc.get("lng")
 
             dep_time = td.get("departure_time") or {}
             dep_ts = dep_time.get("value")
@@ -394,6 +417,8 @@ async def plan_route_with_google(
                     target_lng=tgt_lng,
                     bus_departure_timestamp=dep_ts,
                     bus_departure_text=dep_text,
+                    bus_stop_lat=dep_stop_lat,
+                    bus_stop_lng=dep_stop_lng,
                 )
             )
             idx += 1
@@ -494,6 +519,8 @@ def get_default_route() -> NavRoute:
             mode="walk",
             instruction="請從清華大學校門口往前直走一百公尺，到公車站牌。",
             distance_m=100,
+            target_lat=24.796123,
+            target_lng=120.9935,
         ),
         NavStep(
             index=1,
@@ -505,6 +532,8 @@ def get_default_route() -> NavRoute:
             mode="bus_ride",
             instruction="搭乘五六八公車，坐六站，在新竹火車站前站下車。",
             bus_number="568",
+            bus_stop_lat=24.796123,
+            bus_stop_lng=120.9935,
         ),
         NavStep(
             index=3,
@@ -554,6 +583,31 @@ async def bus_monitor():
     return FileResponse("static/bus_monitor.html")
 
 
+@app.get("/video_test")
+async def video_test():
+    return FileResponse("static/video_test.html")
+
+
+@app.post("/traffic_light/start")
+async def traffic_light_start():
+    return await start_pedestrian_processing()
+
+
+@app.get("/traffic_light/progress")
+async def traffic_light_progress():
+    return get_pedestrian_progress()
+
+
+@app.get("/traffic_light/video/{filename}")
+async def traffic_light_video(filename: str):
+    return get_pedestrian_video(filename)
+
+
+@app.get("/traffic_light/live_preview")
+async def traffic_light_live_preview():
+    return get_pedestrian_live_preview()
+
+
 @app.post("/register_device")
 async def register_device(req: RegisterDeviceRequest):
     now = datetime.datetime.utcnow()
@@ -566,6 +620,25 @@ async def register_device(req: RegisterDeviceRequest):
     else:
         dev.last_seen = now
     return {"status": "ok", "device_id": req.device_id}
+
+
+@app.post("/device_state/reset")
+async def reset_device_state(req: ResetDeviceRequest):
+    dev = devices.get(req.device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="找不到指定的裝置")
+    dev.route = None
+    dev.last_step_index = None
+    dev.last_lat = DEFAULT_ORIGIN["lat"]
+    dev.last_lng = DEFAULT_ORIGIN["lng"]
+    dev.last_seen = datetime.datetime.utcnow()
+    dev.force_resume_requested = False
+    return {
+        "status": "ok",
+        "device_id": req.device_id,
+        "lat": dev.last_lat,
+        "lng": dev.last_lng,
+    }
 
 
 @app.post("/route")
@@ -618,6 +691,29 @@ async def update_location(req: UpdateLocationRequest):
     return UpdateLocationResponse(distance_to_target_m=d, message=None)
 
 
+@app.post("/force_resume")
+async def force_resume(req: ForceResumeRequest):
+    dev = devices.get(req.device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="找不到指定的裝置")
+    if req.clear:
+        dev.force_resume_requested = False
+        return {"status": "cleared", "force_resume_requested": dev.force_resume_requested}
+    dev.force_resume_requested = True
+    return {"status": "requested", "force_resume_requested": dev.force_resume_requested}
+
+
+@app.get("/force_resume/{device_id}")
+async def force_resume_status(device_id: str, clear: bool = Query(False)):
+    dev = devices.get(device_id)
+    if dev is None:
+        raise HTTPException(status_code=404, detail="找不到指定的裝置")
+    flag = dev.force_resume_requested
+    if flag and clear:
+        dev.force_resume_requested = False
+    return {"device_id": device_id, "force_resume_requested": flag}
+
+
 @app.get("/device_state/{device_id}", response_model=DeviceSnapshot)
 async def get_device_state(device_id: str):
     dev = devices.get(device_id)
@@ -630,16 +726,67 @@ async def get_device_state(device_id: str):
         last_lng=dev.last_lng,
         last_step_index=dev.last_step_index,
         route=dev.route,
+        force_resume_requested=dev.force_resume_requested,
     )
 
 
 # === Bus vision / 公車前方 LED 辨識 ===
 
 @app.post("/bus_vision/start")
-async def api_bus_vision_start(use_mobile: bool = False):
-    started = start_bus_vision(use_mobile=use_mobile)
+async def api_bus_vision_start(
+    use_mobile: Optional[str] = Query(None, description="是否使用手機攝影機（'true' 或 'false'）"),
+    video_file_path: Optional[str] = Query(None, description="影片檔案路徑"),
+    start_sec: float = Query(0.0, description="影片開始時間（秒）"),
+    end_sec: Optional[float] = Query(None, description="影片結束時間（秒）")
+):
+    """
+    啟動公車辨識系統
+    
+    Args:
+        use_mobile: 是否使用手機攝影機（字串 "true" 或 "false"，預設 False）
+        video_file_path: 影片檔案路徑（如果提供，會優先使用影片檔案而非手機或電腦攝影機）
+        start_sec: 影片開始時間（秒）
+        end_sec: 影片結束時間（秒）
+    """
+    # 處理 use_mobile 參數（可能是字串 "true"/"false" 或布林值）
+    use_mobile_bool = False
+    if use_mobile is not None:
+        if isinstance(use_mobile, str):
+            use_mobile_bool = use_mobile.lower() == "true"
+        else:
+            use_mobile_bool = bool(use_mobile)
+    
+    started = start_bus_vision(
+        use_mobile=use_mobile_bool, 
+        video_file_path=video_file_path,
+        start_sec=start_sec,
+        end_sec=end_sec
+    )
     status = "started" if started else "already_running"
-    return {"status": status, "use_mobile": use_mobile}
+    
+    # 獲取實際使用的模式（從 bus_vision 模組）
+    from app.bus_vision import _use_video_file, _video_file_path, _use_mobile_camera
+    
+    # 確定實際使用的模式
+    if _use_video_file and _video_file_path:
+        actual_mode = "video_file"
+        actual_video_path = _video_file_path
+        actual_use_mobile = False
+    elif _use_mobile_camera:
+        actual_mode = "mobile"
+        actual_video_path = None
+        actual_use_mobile = True
+    else:
+        actual_mode = "camera"
+        actual_video_path = None
+        actual_use_mobile = False
+    
+    return {
+        "status": status,
+        "use_mobile": actual_use_mobile,
+        "video_file_path": actual_video_path,
+        "mode": actual_mode
+    }
 
 
 @app.post("/bus_vision/stop")

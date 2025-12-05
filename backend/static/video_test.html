@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>You Are My Eyes 視覺整合</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background-color: #0f172a;
+            color: #e5e7eb;
+            display: flex;
+            flex-direction: row;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #video-panel {
+            flex: 3;
+            background-color: #020617;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+        #video-panel img,
+        #video-panel video {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            background-color: #020617;
+        }
+        #info-panel {
+            flex: 2;
+            padding: 16px;
+            border-left: 1px solid #1e293b;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            overflow-y: auto;
+            background-color: #0f172a;
+        }
+        h1 {
+            font-size: 1.2rem;
+            margin: 0;
+            color: #e5e7eb;
+        }
+        .card {
+            background-color: #1e293b;
+            border-radius: 12px;
+            padding: 12px 14px;
+            border: 1px solid #334155;
+        }
+        .label {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-bottom: 4px;
+        }
+        #gps-message {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.65);
+            padding: 12px 18px;
+            border-radius: 999px;
+            display: none;
+            font-size: 0.95rem;
+            color: #fbbf24;
+            font-weight: 600;
+        }
+        #status-text {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        .hidden {
+            display: none !important;
+        }
+        #best-bus-number {
+            font-size: 3rem;
+            font-weight: 700;
+            color: #f97316;
+            text-align: center;
+            margin: 10px 0;
+            line-height: 1;
+        }
+        #all-detections {
+            min-height: 280px;
+        }
+        .detection-item {
+            padding: 10px 14px;
+            background: #0f172a;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            margin-bottom: 6px;
+            font-size: 1rem;
+            display: flex;
+            justify-content: space-between;
+            color: #e5e7eb;
+        }
+        .detection-conf {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        #signal-state {
+            font-size: 3rem;
+            font-weight: 700;
+            text-align: center;
+            margin: 10px 0;
+            line-height: 1;
+        }
+        .state-walk { color: #22c55e; }
+        .state-stop { color: #ef4444; }
+        .state-unknown { color: #f59e0b; }
+        .progress-bar {
+            background: #334155;
+            border-radius: 8px;
+            height: 20px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #22c55e, #10b981);
+            transition: width 0.3s;
+            border-radius: 8px;
+            width: 0%;
+        }
+        .section-title {
+            font-size: 0.85rem;
+            letter-spacing: 0.05em;
+            color: #a5b4fc;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <div id="video-panel">
+        <img id="videoStream" alt="尚未啟動" src="" style="display:none;">
+        <img id="trafficLiveStream" alt="行人辨識預覽" src="" style="display:none;">
+        <video id="trafficResultVideo" controls style="display:none;"></video>
+        <div id="placeholder-text" style="color: #64748b;">等待指令中...</div>
+        <div id="gps-message"><span id="gps-text">距離公車站牌約 50 公尺</span></div>
+    </div>
+
+    <div id="info-panel">
+        <div>
+            <div class="section-title">Multi-Stage Vision</div>
+            <h1 id="mode-title">公車辨識監看 (測試版)</h1>
+            <div id="mode-description" style="font-size:0.9rem;color:#9ca3af;margin-top:4px;">
+                系統將根據距離自動顯示行人號誌／公車 LED 辨識。
+            </div>
+            <div id="status-text" style="margin-top:8px;">狀態: 待命</div>
+        </div>
+
+        <div id="traffic-section" class="mode-section hidden">
+            <div class="card" style="border: 2px solid #22c55e; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);">
+                <div class="label" style="color:#fbbf24;">當前號誌狀態</div>
+                <div id="signal-state" class="state-unknown">—</div>
+                <div style="text-align:center; font-size:0.9rem; color:#94a3b8;">
+                    信心度：<span id="signal-conf" style="color:#fbbf24; font-weight:600;">—</span>
+                </div>
+            </div>
+            <div class="card" id="traffic-progress-card" style="display:none;">
+                <div class="label">辨識進度</div>
+                <div id="progress-text" style="color: #e5e7eb; font-size: 1rem; margin: 8px 0;">0 / 0</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div id="traffic-meta" style="margin-top:10px;font-size:0.8rem;color:#94a3b8;line-height:1.4;"></div>
+            </div>
+            <div class="card" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+                <div class="label">辨識歷程記錄</div>
+                <div id="detection-history" style="flex:1; overflow-y:auto; margin-top:8px;">
+                    <div style="color:#64748b; text-align:center; padding:10px;">尚未開始辨識</div>
+                </div>
+            </div>
+            <div class="card" id="summary-card" style="display:none;">
+                <div class="label">辨識結果統計</div>
+                <div id="summary-content"></div>
+            </div>
+        </div>
+
+        <div id="bus-section" class="mode-section">
+            <div class="card" style="border: 2px solid #f97316; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);">
+                <div class="label" style="color:#fbbf24;">最有信心的公車號碼</div>
+                <div id="best-bus-number">—</div>
+                <div style="text-align:center; font-size:0.9rem; color:#94a3b8;">
+                    信心度：<span id="best-conf" style="color:#fbbf24; font-weight:600;">—</span>
+                </div>
+            </div>
+            <div class="card" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+                <div class="label">所有偵測到的號碼 (Recent Detections)</div>
+                <div id="all-detections" style="flex:1; overflow-y:auto; margin-top:8px;">
+                    <div style="color:#64748b; text-align:center; padding:10px;">尚未偵測到任何號碼</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const VIDEO_PATH = "D:\\\\blindnav_local\\\\backend\\\\videos\\\\IMG_3361.MOV";
+        const START_SEC = 6;
+        const END_SEC = 8;
+        const BUS_DETECTION_DISTANCE = 8;
+        const TARGET_BUS_NUMBER = "5608";
+        const TARGET_CONFIDENCE_THRESHOLD = 0.1;
+
+        const statusEl = document.getElementById('status-text');
+        const placeholder = document.getElementById('placeholder-text');
+        const gpsMsg = document.getElementById("gps-message");
+        const gpsText = document.getElementById("gps-text");
+        const modeTitle = document.getElementById("mode-title");
+        const modeDescription = document.getElementById("mode-description");
+
+        const busImg = document.getElementById('videoStream');
+        const bestNumEl = document.getElementById("best-bus-number");
+        const bestConfEl = document.getElementById("best-conf");
+        const allDetectionsEl = document.getElementById("all-detections");
+
+        const liveImg = document.getElementById('trafficLiveStream');
+        const resultVideo = document.getElementById('trafficResultVideo');
+        const signalStateEl = document.getElementById('signal-state');
+        const signalConfEl = document.getElementById('signal-conf');
+        const progressCard = document.getElementById('traffic-progress-card');
+        const progressText = document.getElementById('progress-text');
+        const progressFill = document.getElementById('progress-fill');
+        const detectionHistoryEl = document.getElementById('detection-history');
+        const summaryCard = document.getElementById('summary-card');
+        const summaryContent = document.getElementById('summary-content');
+        const trafficSection = document.getElementById('traffic-section');
+        const busSection = document.getElementById('bus-section');
+
+        let currentMode = "idle";
+        let busPollInterval;
+        let trafficPollInterval;
+        let isBusRunning = false;
+        let hasShownBusSuccess = false;
+        let isTrafficRunning = false;
+        let trafficHistory = [];
+
+        const stateText = {
+            'walk': '🟢 可通行',
+            'stop': '🔴 請停止',
+            'unknown': '⚪ 未偵測'
+        };
+        const stateClass = {
+            'walk': 'state-walk',
+            'stop': 'state-stop',
+            'unknown': 'state-unknown'
+        };
+
+        function setMode(mode) {
+            currentMode = mode;
+            if (mode === "traffic") {
+                trafficSection.classList.remove("hidden");
+                busSection.classList.add("hidden");
+                modeTitle.textContent = "🚦 行人號誌即時辨識";
+                modeDescription.textContent = "接近公車站牌前 50 公尺，會先確認行人號誌狀態。";
+            } else if (mode === "bus") {
+                busSection.classList.remove("hidden");
+                trafficSection.classList.add("hidden");
+                modeTitle.textContent = "🚌 公車 LED 辨識監看";
+                modeDescription.textContent = "即將靠站時，使用影片辨識公車 LED。";
+            } else {
+                busSection.classList.add("hidden");
+                trafficSection.classList.add("hidden");
+                modeTitle.textContent = "視覺整合模組";
+                modeDescription.textContent = "等待導航啟動視覺輔助。";
+            }
+        }
+
+        function resetTrafficUI() {
+            detectionHistoryEl.innerHTML = '<div style="color:#64748b; text-align:center; padding:10px;">尚未開始辨識</div>';
+            summaryCard.style.display = 'none';
+            progressCard.style.display = 'none';
+            signalStateEl.textContent = '—';
+            signalStateEl.className = 'state-unknown';
+            signalConfEl.textContent = '—';
+            liveImg.style.display = 'none';
+            resultVideo.style.display = 'none';
+            trafficHistory = [];
+            const metaEl = document.getElementById('traffic-meta');
+            if (metaEl) {
+                metaEl.textContent = '來源資訊載入中...';
+            }
+        }
+
+        function resetBusUI() {
+            bestNumEl.textContent = "—";
+            bestNumEl.style.color = "#64748b";
+            bestConfEl.textContent = "—";
+            allDetectionsEl.innerHTML = '<div style="color:#64748b; text-align:center; padding:10px;">尚未偵測到任何號碼</div>';
+            busImg.src = "";
+            busImg.style.display = 'none';
+        }
+
+        function resetEntireView() {
+            stopBusPolling();
+            stopTrafficPolling();
+            isBusRunning = false;
+            isTrafficRunning = false;
+            hasShownBusSuccess = false;
+            trafficHistory = [];
+            resetTrafficUI();
+            resetBusUI();
+            setMode("idle");
+            placeholder.textContent = "等待指令中...";
+            placeholder.style.display = 'block';
+            gpsMsg.style.display = 'none';
+            liveImg.style.display = 'none';
+            resultVideo.style.display = 'none';
+        }
+
+        function showTrafficPlaceholder(text) {
+            placeholder.textContent = text;
+            placeholder.style.display = 'block';
+            liveImg.style.display = 'none';
+            resultVideo.style.display = 'none';
+            busImg.style.display = 'none';
+        }
+
+        function enterTrafficMode() {
+            if (isTrafficRunning) return;
+            setMode("traffic");
+            resetTrafficUI();
+            statusEl.textContent = "狀態: 行人號誌辨識準備中...";
+            statusEl.style.color = "#94a3b8";
+            placeholder.style.display = 'none';
+            gpsMsg.style.display = 'none';
+            startTrafficDetection();
+        }
+
+        async function startTrafficDetection() {
+            if (isTrafficRunning) return;
+            isTrafficRunning = true;
+            statusEl.textContent = "狀態: 行人號誌辨識啟動中...";
+            statusEl.style.color = "#22c55e";
+            liveImg.style.display = 'block';
+            liveImg.src = "";
+            startTrafficPolling();
+
+            try {
+                const response = await fetch('/traffic_light/start', { method: 'POST' });
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '處理失敗');
+                }
+                const data = await response.json();
+
+                stopTrafficPolling();
+                isTrafficRunning = false;
+                statusEl.textContent = "狀態: 行人號誌辨識完成";
+                statusEl.style.color = "#22c55e";
+
+                liveImg.style.display = 'none';
+                resultVideo.style.display = 'block';
+                resultVideo.src = `/traffic_light/video/${data.processed_video}`;
+                resultVideo.play();
+
+                summaryCard.style.display = 'block';
+                const summary = data.summary;
+                const dominantState = summary.dominant_state;
+                summaryContent.innerHTML = `
+                    <div style="text-align: center; padding: 15px; background: ${
+                        dominantState === 'walk' ? '#166534' : dominantState === 'stop' ? '#991b1b' : '#92400e'
+                    }; border-radius: 8px; margin: 10px 0;">
+                        <div style="font-size: 1.8rem; font-weight: 700;">${stateText[dominantState]}</div>
+                        <div style="font-size: 0.9rem; margin-top: 5px; opacity: 0.9;">主要辨識結果</div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px;">
+                        <div style="background: #166534; padding: 12px; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 1.5rem; font-weight: 700;">${summary.state_counts.walk || 0}</div>
+                            <div style="font-size: 0.8rem; opacity: 0.9;">綠燈幀</div>
+                        </div>
+                        <div style="background: #991b1b; padding: 12px; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 1.5rem; font-weight: 700;">${summary.state_counts.stop || 0}</div>
+                            <div style="font-size: 0.8rem; opacity: 0.9;">紅燈幀</div>
+                        </div>
+                        <div style="background: #92400e; padding: 12px; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 1.5rem; font-weight: 700;">${summary.state_counts.unknown || 0}</div>
+                            <div style="font-size: 0.8rem; opacity: 0.9;">未偵測</div>
+                        </div>
+                    </div>
+                    <div style="margin-top: 12px; font-size: 0.9rem; color: #94a3b8;">
+                        <p>總幀數: ${summary.frame_count}</p>
+                        <p>處理時間: ${summary.processing_seconds} 秒</p>
+                    </div>
+                `;
+
+                if (window.opener) {
+                    window.opener.postMessage({ type: "TRAFFIC_COMPLETE", failed: false }, "*");
+                }
+
+                showTrafficPlaceholder("行人號誌確認完成，等待導航繼續...");
+            } catch (error) {
+                console.error(error);
+                stopTrafficPolling();
+                isTrafficRunning = false;
+                statusEl.textContent = `狀態: 行人號誌辨識失敗 (${error.message})`;
+                statusEl.style.color = "#ef4444";
+                detectionHistoryEl.innerHTML = `
+                    <div style="background: #7f1d1d; color: #fecaca; padding: 15px; border-radius: 8px; text-align: center;">
+                        ❌ ${error.message}
+                    </div>
+                `;
+                showTrafficPlaceholder("辨識失敗，等待重新指令...");
+                if (window.opener) {
+                    window.opener.postMessage({ type: "TRAFFIC_COMPLETE", failed: true }, "*");
+                }
+            }
+        }
+
+        function startTrafficPolling() {
+            if (trafficPollInterval) clearInterval(trafficPollInterval);
+            progressCard.style.display = 'block';
+            trafficPollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch('/traffic_light/progress');
+                    const progress = await res.json();
+                    if (progress.active && progress.total_frames > 0) {
+                        updateTrafficProgress(progress);
+                    }
+                } catch (err) {
+                    console.error('traffic poll error', err);
+                }
+            }, 400);
+        }
+
+        function stopTrafficPolling() {
+            if (trafficPollInterval) clearInterval(trafficPollInterval);
+        }
+
+        function updateTrafficProgress(progress) {
+            if (typeof progress.preview_version === 'number' && progress.preview_version > 0) {
+                liveImg.src = `/traffic_light/live_preview?t=${progress.preview_version}`;
+                liveImg.style.display = 'block';
+                placeholder.style.display = 'none';
+            } else if (progress.current_image) {
+                liveImg.src = progress.current_image;
+                liveImg.style.display = 'block';
+                placeholder.style.display = 'none';
+            }
+
+            progressFill.style.width = (progress.progress || 0) + '%';
+            progressText.textContent = `${progress.current_frame} / ${progress.total_frames} 張`;
+
+            const state = progress.current_state || 'unknown';
+            signalStateEl.textContent = stateText[state] || '—';
+            signalStateEl.className = stateClass[state] || 'state-unknown';
+
+            if (progress.meta) {
+                const meta = progress.meta;
+                const metaEl = document.getElementById('traffic-meta');
+                if (metaEl) {
+                    metaEl.innerHTML = `
+                    <div>來源影片：<span style="color:#fbbf24;">${meta.video_path || '未知'}</span></div>
+                    <div>分析時間：${meta.start_sec ?? '?'}s ~ ${meta.end_sec ?? '?'}s</div>
+                    <div>取樣間隔：${meta.frame_interval_sec ?? 0.5} 秒 (約每 0.5 秒取一張)</div>
+                `;
+                }
+            }
+
+            if (typeof progress.progress === 'number') {
+                statusEl.textContent = `狀態: 行人辨識中 (${progress.progress}%)`;
+                statusEl.style.color = "#22c55e";
+            }
+
+            if (progress.current_frame > trafficHistory.length) {
+                trafficHistory.push({
+                    frame: progress.current_frame,
+                    state,
+                    timestamp: new Date().toLocaleTimeString('zh-TW')
+                });
+                const recent = trafficHistory.slice(-10).reverse();
+                detectionHistoryEl.innerHTML = recent.map(item => `
+                    <div class="detection-item">
+                        <span style="font-weight: 600;">${stateText[item.state]}</span>
+                        <span class="detection-conf">第 ${item.frame} 張 | ${item.timestamp}</span>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function enterBusMode({ autoStart = false } = {}) {
+            setMode("bus");
+            placeholder.textContent = autoStart ? "即將啟動公車辨識..." : "等待靠近公車站牌...";
+            placeholder.style.display = 'block';
+            gpsMsg.style.display = 'none';
+            if (autoStart) {
+                startBusDetection();
+            }
+        }
+
+        async function startBusDetection() {
+            if (isBusRunning) return;
+            isBusRunning = true;
+            hasShownBusSuccess = false;
+
+            const url = new URL('/bus_vision/start', window.location.origin);
+            url.searchParams.append('video_file_path', VIDEO_PATH);
+            url.searchParams.append('start_sec', START_SEC.toString());
+            url.searchParams.append('end_sec', END_SEC.toString());
+
+            statusEl.textContent = "狀態: 公車辨識啟動中...";
+            statusEl.style.color = "#22c55e";
+            placeholder.style.display = 'none';
+            gpsMsg.style.display = 'none';
+
+            try {
+                const res = await fetch(url, { method: 'POST' });
+                const data = await res.json();
+                console.log("Bus start response:", data);
+
+                statusEl.textContent = "狀態: 公車辨識執行中";
+                busImg.src = "/bus_vision/stream?t=" + new Date().getTime();
+                busImg.style.display = 'block';
+                liveImg.style.display = 'none';
+                resultVideo.style.display = 'none';
+
+                startBusPolling();
+            } catch (e) {
+                console.error(e);
+                statusEl.textContent = "狀態: 啟動失敗 " + e;
+                statusEl.style.color = "#ef4444";
+                isBusRunning = false;
+            }
+        }
+
+        async function stopBusDetection({ skipStatusUpdate = false } = {}) {
+            try {
+                await fetch('/bus_vision/stop', { method: 'POST' });
+                if (!skipStatusUpdate) {
+                    statusEl.textContent = "狀態: 公車辨識已停止";
+                    statusEl.style.color = "#94a3b8";
+                }
+                busImg.src = "";
+                busImg.style.display = 'none';
+                stopBusPolling();
+                isBusRunning = false;
+            } catch (e) {
+                console.error(e);
+                if (!skipStatusUpdate) {
+                    statusEl.textContent = "狀態: 停止失敗";
+                }
+            }
+        }
+
+        function startBusPolling() {
+            if (busPollInterval) clearInterval(busPollInterval);
+            busPollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch('/bus_vision/status');
+                    const data = await res.json();
+                    updateBusDisplay(data);
+                } catch (e) {
+                    console.error("Bus poll error", e);
+                    statusEl.textContent = "狀態: 連線中斷";
+                }
+            }, 500);
+        }
+
+        function stopBusPolling() {
+            if (busPollInterval) clearInterval(busPollInterval);
+        }
+
+        function updateBusDisplay(data) {
+            if (currentMode !== "bus") return;
+            let bestNum = data.best_bus_number;
+            let bestConf = data.best_confidence;
+
+            const normalizedBest = typeof bestNum === 'string' ? bestNum.trim() : "";
+            if (normalizedBest) {
+                bestNumEl.textContent = normalizedBest;
+                bestNumEl.style.color = normalizedBest === TARGET_BUS_NUMBER ? "#f97316" : "#facc15";
+                if (typeof bestConf === 'number' && bestConf > 0) {
+                    bestConfEl.textContent = (bestConf * 100).toFixed(1) + "%";
+                } else {
+                    bestConfEl.textContent = "—";
+                }
+            } else {
+                bestNumEl.textContent = "—";
+                bestNumEl.style.color = "#64748b";
+                bestConfEl.textContent = "—";
+            }
+
+            if (
+                normalizedBest === TARGET_BUS_NUMBER &&
+                typeof bestConf === 'number' &&
+                bestConf >= TARGET_CONFIDENCE_THRESHOLD &&
+                !hasShownBusSuccess
+            ) {
+                hasShownBusSuccess = true;
+                showBusSuccess(TARGET_BUS_NUMBER);
+                return;
+            }
+
+            const detections = data.all_detections || [];
+            const count = data.detection_count || 0;
+            const required = data.required_count || 5;
+
+            allDetectionsEl.innerHTML = "";
+            if (detections.length > 0) {
+                detections.forEach(det => {
+                    const div = document.createElement("div");
+                    div.className = "detection-item";
+                    const numSpan = document.createElement("span");
+                    numSpan.textContent = det.bus_number || "未知";
+                    numSpan.style.fontWeight = "600";
+                    const confSpan = document.createElement("span");
+                    confSpan.className = "detection-conf";
+                    const confVal = typeof det.confidence === 'number' ? det.confidence : 0;
+                    confSpan.textContent = (confVal * 100).toFixed(1) + "%";
+                    div.appendChild(numSpan);
+                    div.appendChild(confSpan);
+                    allDetectionsEl.appendChild(div);
+                });
+
+                const infoDiv = document.createElement("div");
+                infoDiv.style.textAlign = "center";
+                infoDiv.style.padding = "8px";
+                infoDiv.style.fontSize = "0.9rem";
+                if (count < required) {
+                    infoDiv.style.color = "#94a3b8";
+                    infoDiv.textContent = `收集進度: ${count} / ${required}`;
+                } else {
+                    infoDiv.style.color = "#22c55e";
+                    infoDiv.textContent = `✓ 已完成收集 (${count}/${required})`;
+                }
+                allDetectionsEl.appendChild(infoDiv);
+            } else {
+                const emptyDiv = document.createElement("div");
+                emptyDiv.style.textAlign = "center";
+                emptyDiv.style.padding = "20px";
+                emptyDiv.style.color = "#64748b";
+                emptyDiv.textContent = "尚未偵測到任何號碼";
+                allDetectionsEl.appendChild(emptyDiv);
+            }
+        }
+
+        function showBusSuccess(busNumber) {
+            stopBusPolling();
+            stopBusDetection({ skipStatusUpdate: true });
+            placeholder.textContent = `已辨識成功，公車 ${busNumber} 號即將發車。`;
+            placeholder.style.display = 'block';
+            statusEl.textContent = `狀態: 已成功偵測，公車號碼 ${busNumber}`;
+            statusEl.style.color = "#22c55e";
+            busImg.style.display = 'none';
+            gpsMsg.style.display = 'none';
+
+            if (window.opener) {
+                window.opener.postMessage({
+                    type: "DETECTION_COMPLETE",
+                    busNumber: busNumber
+                }, "*");
+            }
+        }
+
+        window.addEventListener("message", (event) => {
+            const data = event.data;
+            if (!data) return;
+
+            if (data.type === "gps_message") {
+                if (!isBusRunning && !isTrafficRunning) {
+                    const displayMsg = data.message || (typeof data.distance === "number"
+                        ? `距離公車站牌約 ${Math.round(data.distance)} 公尺`
+                        : "正在前往公車站牌...");
+                    gpsText.textContent = displayMsg;
+                    gpsMsg.style.display = "block";
+                    placeholder.style.display = "none";
+                }
+            }
+
+            if (data.type === "update_distance") {
+                if (typeof data.distance === "number" && !isBusRunning && currentMode === "bus") {
+                    gpsText.textContent = `距離公車站牌約 ${Math.round(data.distance)} 公尺`;
+                    gpsMsg.style.display = "block";
+                }
+            }
+
+            if (typeof data.distance === 'number' && currentMode === "bus") {
+                if (!isBusRunning && data.distance <= BUS_DETECTION_DISTANCE) {
+                    console.log(`距離 <= ${BUS_DETECTION_DISTANCE}m，自動啟動公車辨識`);
+                    gpsMsg.style.display = "none";
+                    startBusDetection();
+                }
+            }
+
+            if (data.type === "start_bus_detection") {
+                enterBusMode({ autoStart: !!data.autoStart });
+            }
+
+            if (data.type === "start_detection") {
+                enterBusMode({ autoStart: true });
+            }
+
+            if (data.type === "start_traffic_detection") {
+                enterTrafficMode();
+            }
+
+            if (data.type === "RESET_VIEW" || data.type === "reset_view") {
+                resetEntireView();
+            }
+        });
+
+        setMode("idle");
+    </script>
+</body>
+</html>

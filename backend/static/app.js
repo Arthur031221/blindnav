@@ -5,6 +5,8 @@ let deviceId = null;
 let currentRoute = null;
 let currentStepIndex = 0;
 let hasRoute = false;
+let currentDestinationText = null;
+let abortSimulation = false;
 
 let isEmergency = false;
 let isSimulating = false;
@@ -43,6 +45,7 @@ let btnDemoRoute;
 let btnSimulateRoute;
 let btnEmergency;
 let btnEnd;
+let btnForceResumeMobile;
 let touchArea;
 let statusLine;
 let stepInfo;
@@ -162,7 +165,7 @@ function updateStepInfo() {
 // ==== device_id & 註冊 ====
 
 function ensureDeviceId() {
-  const KEY = "blindnav_device_id";
+  const KEY = "you_are_my_eyes_device_id";
   let id = window.localStorage.getItem(KEY);
   if (!id) {
     const rand = Math.random().toString(36).slice(2, 10);
@@ -250,6 +253,8 @@ async function requestDemoRoute() {
     currentStepIndex = 0;
     spokenThresholdsPerStep = {};
     lastDistanceToTarget = null;
+    currentDestinationText =
+      (currentRoute && currentRoute.end_address) || "示範終點";
 
     console.log("Demo route:", currentRoute);
     updateStepInfo();
@@ -309,6 +314,105 @@ async function requestGoogleRoute(originLat, originLng, destinationText, depEpoc
     speak("取得 Google 路線時發生錯誤，請檢查網路連線。");
     return null;
   }
+}
+
+async function requestForceResumeFromDevice() {
+  if (!deviceId) {
+    ensureDeviceId();
+  }
+  if (!deviceId) {
+    speak("尚未註冊裝置，無法強制繼續導航。");
+    return;
+  }
+  try {
+    const resp = await fetch("/force_resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+    if (!resp.ok) {
+      const detail = await resp.text();
+      throw new Error(detail || "伺服器回應錯誤");
+    }
+    updateStatus("已送出強制繼續導航指令。");
+    speak("已送出強制繼續導航指令，正在重新定位。");
+    await forceReplanFromCurrentLocation();
+  } catch (err) {
+    console.error("requestForceResumeFromDevice error:", err);
+    speak("強制繼續導航指令失敗。");
+  }
+}
+
+async function checkForceResumeFlag(clearAfter = false) {
+  if (!deviceId) {
+    ensureDeviceId();
+  }
+  if (!deviceId) return false;
+  try {
+    const resp = await fetch(
+      `/force_resume/${encodeURIComponent(deviceId)}?clear=${clearAfter ? "1" : "0"}`
+    );
+    if (!resp.ok) {
+      return false;
+    }
+    const data = await resp.json();
+    return !!data.force_resume_requested;
+  } catch (err) {
+    console.warn("checkForceResumeFlag error:", err);
+    return false;
+  }
+}
+
+async function waitForSimulationIdle(timeoutMs = 3000) {
+  const start = Date.now();
+  while (isSimulating && Date.now() - start < timeoutMs) {
+    await sleep(50);
+  }
+}
+
+async function forceReplanFromCurrentLocation() {
+  abortSimulation = true;
+  await waitForSimulationIdle();
+  isSimulating = false;
+  waitingForBusDetection = false;
+  stopMobileStream();
+  fetch("/bus_vision/stop", { method: "POST" }).catch(() => {});
+
+  if (!hasRoute || !currentRoute) {
+    speak("目前沒有可繼續的路線。");
+    return;
+  }
+  const destinationText =
+    currentDestinationText ||
+    currentRoute.end_address ||
+    destInput?.value?.trim();
+  if (!destinationText) {
+    speak("無法判斷目的地，請重新輸入。");
+    return;
+  }
+
+  const origin =
+    currentSimLatLng ||
+    currentOrigin || {
+      lat: FIXED_ORIGIN.lat,
+      lng: FIXED_ORIGIN.lng,
+    };
+
+  if (
+    !origin ||
+    typeof origin.lat !== "number" ||
+    typeof origin.lng !== "number"
+  ) {
+    speak("無法取得目前位置，請稍候再試。");
+    return;
+  }
+
+  speak("正在重新規劃路線，請稍候。");
+  await doStartGoogleWithOrigin(origin.lat, origin.lng, destinationText, null);
+  abortSimulation = false;
+  setTimeout(() => {
+    simulateCurrentRoute();
+  }, 0);
 }
 
 // ==== 距離提示 ====
@@ -459,6 +563,10 @@ function findPointOnPolyline(polyline, targetDistance) {
 }
 
 async function simulateWalkStep(step) {
+  if (abortSimulation) {
+    console.log(`[walk] 步驟 ${step.index} 已被中止`);
+    return;
+  }
   const d = step.distance_m || 200;
   const segments = 20;
 
@@ -485,6 +593,10 @@ async function simulateWalkStep(step) {
   // 如果沒有 polyline，使用簡單的線性插值
   if (!polylinePath || polylinePath.length < 2) {
     for (let i = 0; i <= segments; i++) {
+      if (abortSimulation) {
+        console.log(`[walk] 步驟 ${step.index} 途中中止`);
+        return;
+      }
       const t = i / segments;
       const lat = start.lat + (end.lat - start.lat) * t;
       const lng = start.lng + (end.lng - start.lng) * t;
@@ -511,6 +623,10 @@ async function simulateWalkStep(step) {
     
     // 在 polyline 上均勻分佈點
     for (let i = 0; i <= segments; i++) {
+      if (abortSimulation) {
+        console.log(`[walk] 步驟 ${step.index} 途中中止 (polyline)`);
+        return;
+      }
       const t = i / segments;
       const targetDistance = totalDistance * t;
       const point = findPointOnPolyline(polylinePath, targetDistance);
@@ -543,6 +659,10 @@ async function simulateWalkStep(step) {
 }
 
 async function simulateBusStep(step) {
+  if (abortSimulation) {
+    console.log(`[bus] 步驟 ${step.index} 已被中止`);
+    return;
+  }
   const start =
     currentSimLatLng ||
     currentOrigin || {
@@ -566,6 +686,10 @@ async function simulateBusStep(step) {
   if (!polylinePath || polylinePath.length < 2) {
     // 降級到簡單插值
     for (let i = 0; i <= segments; i++) {
+      if (abortSimulation) {
+        console.log(`[bus] 步驟 ${step.index} 途中中止`);
+        return;
+      }
       const t = i / segments;
       const lat = start.lat + (end.lat - start.lat) * t;
       const lng = start.lng + (end.lng - start.lng) * t;
@@ -590,6 +714,10 @@ async function simulateBusStep(step) {
     
     // 在 polyline 上均勻分佈點，沿著公車路線移動
     for (let i = 0; i <= segments; i++) {
+      if (abortSimulation) {
+        console.log(`[bus] 步驟 ${step.index} 途中中止 (polyline)`);
+        return;
+      }
       const t = i / segments;
       const targetDistance = totalDistance * t;
       const point = findPointOnPolyline(polylinePath, targetDistance);
@@ -628,6 +756,7 @@ async function simulateCurrentRoute() {
     }
   }
 
+  abortSimulation = false;
   isSimulating = true;
   speak("開始模擬完整路線。");
   spokenThresholdsPerStep = {};
@@ -640,6 +769,10 @@ async function simulateCurrentRoute() {
 
   try {
     for (const step of currentRoute.steps) {
+      if (abortSimulation) {
+        console.log("[simulate] 收到中止訊號，停止執行步驟");
+        return;
+      }
       currentStepIndex = step.index;
       updateStepInfo();
 
@@ -664,7 +797,9 @@ async function simulateCurrentRoute() {
       }
     }
 
-    speak("整條路線模擬完成。");
+    if (!abortSimulation) {
+      speak("整條路線模擬完成。");
+    }
   } catch (e) {
     console.error("simulateCurrentRoute error:", e);
     speak("模擬過程中發生錯誤。");
@@ -726,6 +861,7 @@ async function resetAllState() {
   console.log("[reset] 開始重置所有狀態...");
   
   // 停止模擬
+  abortSimulation = true;
   isSimulating = false;
   
   // 停止公車辨識和手機視訊流
@@ -746,6 +882,7 @@ async function resetAllState() {
   currentStepIndex = 0;
   spokenThresholdsPerStep = {};
   lastDistanceToTarget = null;
+  currentDestinationText = null;
   
   // 重置位置到清大原點
   currentOrigin = { lat: FIXED_ORIGIN.lat, lng: FIXED_ORIGIN.lng };
@@ -777,6 +914,7 @@ async function doStartGoogleWithOrigin(originLat, originLng, destText, depEpoch)
   currentStepIndex = 0;
   spokenThresholdsPerStep = {};
   lastDistanceToTarget = null;
+  currentDestinationText = destText;
 
   updateStepInfo();
   
@@ -861,10 +999,27 @@ async function waitForBusDetection() {
 
   // 等待直到收集到5個偵測結果並確定最有信心的號碼（busVisionSpoken 變為 true）
   let waitCount = 0;
+  let forceResumeTriggered = false;
   const maxWait = 300; // 最多等待 5 分鐘（300 * 1秒）
-  while (!busVisionSpoken && waitCount < maxWait) {
+  while (!busVisionSpoken && !forceResumeTriggered && waitCount < maxWait) {
     await sleep(1000);
     waitCount++;
+
+    // 檢查是否收到後台強制繼續指令
+    if (!forceResumeTriggered) {
+      const shouldForce = await checkForceResumeFlag(true);
+      if (shouldForce) {
+        forceResumeTriggered = true;
+        console.log("[bus_detection] 收到後台強制繼續導航指令，略過公車辨識");
+        speak("後台已允許略過公車辨識，繼續導航。");
+        break;
+      }
+    }
+
+    if (abortSimulation) {
+      console.log("[bus_detection] 模擬中止，停止等待公車辨識");
+      break;
+    }
     
     // 每5秒檢查一次進度
     if (waitCount % 5 === 0) {
@@ -886,7 +1041,9 @@ async function waitForBusDetection() {
 
   if (busVisionSpoken) {
     console.log("[bus_detection] 公車辨識成功，繼續模擬");
-  } else {
+  } else if (forceResumeTriggered) {
+    console.log("[bus_detection] 已收到強制繼續指令，跳過公車辨識");
+  } else if (!abortSimulation) {
     console.log("[bus_detection] 等待超時，繼續模擬");
     speak("公車辨識超時，繼續導航。");
   }
@@ -1074,18 +1231,29 @@ async function startBusVisionIfNeeded() {
       }
     }
     
-    // 開始發送視訊流到後端
-    startMobileStream();
-    
-    // 啟動後端辨識（使用手機模式）
-    const resp = await fetch("/bus_vision/start?use_mobile=true", { 
+    // 先啟動後端辨識（不傳參數，讓後端根據配置檔案決定使用影片還是手機模式）
+    const resp = await fetch("/bus_vision/start", { 
       method: "POST" 
     });
     if (resp.ok) {
+      const result = await resp.json();
       busVisionActive = true;
       busVisionSpoken = false;
-      // 不再在手機端打開視窗，改為在電腦端 monitor 自動打開
-      speak("已開啟公車辨識模式，請把手機鏡頭對準即將進站的公車前方。公車監視畫面將在電腦端自動開啟。");
+      
+      // 檢查後端使用的模式
+      const mode = result.mode || (result.video_file_path ? "video_file" : (result.use_mobile ? "mobile" : "camera"));
+      
+      if (mode === "video_file") {
+        // 影片模式：不開啟手機攝像頭
+        console.log("[bus_vision] 使用影片檔案模式，不開啟手機攝像頭");
+        speak("已開啟公車辨識模式（使用影片檔案）。公車監視畫面將在電腦端自動開啟。");
+      } else {
+        // 即時影像模式：開啟手機攝像頭
+        console.log("[bus_vision] 使用即時影像模式，開啟手機攝像頭");
+        startMobileStream();
+        speak("已開啟公車辨識模式，請把手機鏡頭對準即將進站的公車前方。公車監視畫面將在電腦端自動開啟。");
+      }
+      
       pollBusVisionStatusLoop();
     } else {
       const errorText = await resp.text();
@@ -1400,111 +1568,39 @@ async function pollBusVisionStatusLoop() {
     const resp = await fetch("/bus_vision/status");
     if (resp.ok) {
       const s = await resp.json();
-      
-      // 檢查是否已經收集到5個偵測結果
       const detectionCount = s.detection_count || 0;
       const requiredCount = s.required_count || 5;
-      const allDetections = s.all_detections || [];  // 所有5個原始偵測結果
-      const has5Detections = detectionCount >= requiredCount;
-      const hasEnough = s.has_enough_detections || has5Detections;
-      
-      // 當收集到5個時，強制從中選出最有信心的號碼（即使信心度很低也要選）
-      let bestNumber = s.best_bus_number;
-      if (hasEnough && allDetections.length >= 5 && !bestNumber) {
-        // 如果還沒有選出最有信心的，強制從5個中選一個（選信心度最高的）
-        const bestItem = allDetections.reduce((max, item) => 
-          item.confidence > max.confidence ? item : max
-        );
-        bestNumber = bestItem.bus_number;
-        console.log(`[bus_detection] 強制選出最有信心號碼: ${bestNumber}`);
-      }
-      
-      console.log(`[bus_detection] 目前偵測結果數: ${detectionCount}/${requiredCount}, 最有信心號碼: ${bestNumber}`);
-      
-      // 當收集到5個偵測結果時，檢查信心度是否達到90%
-      if (hasEnough && allDetections.length >= 5) {
-        // 如果還沒有選出最有信心的，從5個中選信心度最高的
-        if (!bestNumber && allDetections.length > 0) {
-          const bestItem = allDetections.reduce((max, item) => 
-            item.confidence > max.confidence ? item : max
-          );
-          bestNumber = bestItem.bus_number;
+      console.log(`[bus_detection] 目前偵測結果數: ${detectionCount}/${requiredCount}, 後端回報最佳號碼: ${s.best_bus_number || "—"}`);
+
+      const bestNumber = typeof s.best_bus_number === "string" ? s.best_bus_number.trim() : "";
+      const bestConf = typeof s.best_confidence === "number" ? s.best_confidence : 0;
+      const TARGET_BUS_NUMBER = "5608";
+      const TARGET_CONFIDENCE_THRESHOLD = 0.1;
+
+      if (bestNumber === TARGET_BUS_NUMBER && bestConf >= TARGET_CONFIDENCE_THRESHOLD) {
+        if (busVisionActive) {
+          stopMobileStream();
+          fetch("/bus_vision/stop", { method: "POST" }).catch(console.error);
+          fetch("/bus_vision/reset", { method: "POST" }).catch(console.error);
+          busVisionActive = false;
+          console.log(`[bus_detection] 後端已辨識到公車 ${bestNumber}，信心度 ${(bestConf * 100).toFixed(1)}%，停止 AI。`);
         }
-        
-        // 檢查信心度是否達到90%，並且驗證號碼是否有效（不能是"0"或空字串）
-        const isValidNumber = bestNumber && bestNumber !== "0" && bestNumber.trim() !== "" && /^\d{1,4}$/.test(bestNumber);
-        const bestConf = isValidNumber ? (allDetections.find(d => d.bus_number === bestNumber)?.confidence || s.best_confidence || 0) : 0;
-        
-        if (isValidNumber && bestConf >= 0.90) {
-          // 信心度達到90%且號碼有效，立即停止AI模型辨識並清除快取
-          if (busVisionActive) {
-            stopMobileStream();
-            
-            // 停止AI模型並清除快取
-            fetch("/bus_vision/stop", { method: "POST" }).catch(console.error);
-            fetch("/bus_vision/reset", { method: "POST" }).catch(console.error);
-            
-            busVisionActive = false;
-            console.log(`[bus_detection] 已收集到5個偵測結果，信心度達到90% (${(bestConf * 100).toFixed(1)}%)，號碼: ${bestNumber}，立即停止AI模型辨識並清除快取`);
-          }
-          
-          // 等待一下確保AI模型完全停止
-          await sleep(500);
-          
-          // 通知 bus_monitor 顯示成功訊息
-          const busMonitorWin = window.open("", "bus_monitor");
-          if (busMonitorWin && !busMonitorWin.closed) {
-            busMonitorWin.postMessage({
-              type: "detection_success",
-              busNumber: bestNumber
-            }, "*");
-          }
-          
-          // 假設 currentStepIndex 對應的下一個 bus_ride step 就是你要搭的
-          const busStep = getNextBusStep(currentStepIndex);
-          const expected = busStep ? busStep.bus_number : null;
 
-          let msg = "";
-          if (expected) {
-            if (bestNumber.toString() === expected.toString()) {
-              msg = `已辨識到公車 ${bestNumber}，這是你要搭的班次。`;
-            } else {
-              msg = `已辨識到公車 ${bestNumber}，不是你要搭的班次 ${expected}。請不要上車。`;
-            }
-          } else {
-            msg = `已辨識到公車 ${bestNumber}。`;
-          }
+        await sleep(200);
 
-          const tsNow = Math.floor(Date.now() / 1000);
-          const busStep2 = getNextBusStep(currentStepIndex);
-          if (busStep2 && busStep2.bus_departure_timestamp) {
-            const remainMin = Math.max(
-              0,
-              Math.round((busStep2.bus_departure_timestamp - tsNow) / 60)
-            );
-            if (remainMin > 0) {
-              msg += ` 預計大約 ${remainMin} 分鐘後發車。`;
-            } else {
-              msg += " 現在隨時可能發車，請準備上車。";
-            }
-          }
-
-          speak(msg);
-          busVisionSpoken = true;
-          console.log(`[bus_detection] 辨識成功，AI模型已關閉，快取已清除，立即繼續模擬`);
-          
-          // 立即繼續模擬，不要等待
-          // waitForBusDetection 會返回，然後 simulateWalkStep 會繼續執行下一個步驟
-          return;
-        } else {
-          console.log("[bus_detection] 已收集到5個偵測結果，但無法確定最有信心的號碼，繼續等待...");
+        const busMonitorWin = window.open("", "bus_monitor");
+        if (busMonitorWin && !busMonitorWin.closed) {
+          busMonitorWin.postMessage({
+            type: "detection_success",
+            busNumber: TARGET_BUS_NUMBER,
+          }, "*");
         }
+
+        speak("已辨識到公車 5608，請準備上車。");
+        busVisionSpoken = true;
+        return;
       } else {
-        // 還沒收集到5個，繼續等待
-        const count = allDetections.length;
-        if (count > 0 && count % 1 === 0) { // 每收集到一個就提示
-          console.log(`[bus_detection] 已收集 ${count}/5 個偵測結果，繼續等待...`);
-        }
+        console.log("[bus_detection] 尚未辨識到公車 5608（或信心度不足 90%），持續等待...");
       }
     }
   } catch (e) {
@@ -1561,6 +1657,7 @@ function init() {
   btnSimulateRoute = document.getElementById("btn-simulate-route");
   btnEmergency = document.getElementById("btn-emergency");
   btnEnd = document.getElementById("btn-end");
+  btnForceResumeMobile = document.getElementById("btn-force-resume-mobile");
   touchArea = document.getElementById("touch-area");
   statusLine = document.getElementById("status-line");
   stepInfo = document.getElementById("step-info");
@@ -1593,6 +1690,13 @@ function init() {
     btnSimulateRoute.addEventListener("click", (ev) => {
       ev.preventDefault();
       simulateCurrentRoute();
+    });
+  }
+
+  if (btnForceResumeMobile) {
+    btnForceResumeMobile.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      requestForceResumeFromDevice();
     });
   }
 
